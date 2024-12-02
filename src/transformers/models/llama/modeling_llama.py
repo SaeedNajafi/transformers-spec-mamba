@@ -1187,6 +1187,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
             return (loss,) + output if loss is not None else output
 
         return CausalLMOutputWithPast(
+            last_hidden_state=hidden_states,
             loss=loss,
             logits=logits,
             past_key_values=outputs.past_key_values,
