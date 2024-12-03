@@ -152,6 +152,7 @@ class GenerateDecoderOnlyOutput(ModelOutput):
     hidden_states: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
     past_key_values: Optional[Tuple[Tuple[Tuple[torch.FloatTensor]]]] = None
     cache_params: Optional[MambaCache] = None
+    last_hidden_state: Optional[torch.FloatTensor] = None
 
 
 @dataclass
@@ -1916,6 +1917,7 @@ class GenerationMixin:
         streamer: Optional["BaseStreamer"] = None,
         negative_prompt_ids: Optional[torch.Tensor] = None,
         negative_prompt_attention_mask: Optional[torch.Tensor] = None,
+        eagle_input_features: Optional[torch.FloatTensor] = None,
         **kwargs,
     ) -> Union[GenerateOutput, torch.LongTensor]:
         r"""
@@ -2264,6 +2266,7 @@ class GenerationMixin:
                 generation_config=generation_config,
                 synced_gpus=synced_gpus,
                 streamer=streamer,
+                eagle_input_features=eagle_input_features,
                 **model_kwargs,
             )
 
@@ -3172,6 +3175,7 @@ class GenerationMixin:
         generation_config: GenerationConfig,
         synced_gpus: bool,
         streamer: Optional["BaseStreamer"],
+        eagle_input_features: Optional[torch.FloatTensor] = None,
         **model_kwargs,
     ) -> Union[GenerateNonBeamOutput, torch.LongTensor]:
         r"""
@@ -3247,7 +3251,10 @@ class GenerationMixin:
             model_inputs.update({"output_hidden_states": output_hidden_states} if output_hidden_states else {})
 
             # forward pass to get next token
-            outputs = self(**model_inputs, return_dict=True)
+            if eagle_input_features is not None:
+                outputs = self(**model_inputs, eagle_input_features=eagle_input_features, return_dict=True)
+            else:
+                outputs = self(**model_inputs, return_dict=True)
 
             # synced_gpus: don't waste resources running the code we don't need; kwargs must be updated before skipping
             model_kwargs = self._update_model_kwargs_for_generation(
@@ -3307,6 +3314,10 @@ class GenerationMixin:
             this_peer_finished = unfinished_sequences.max() == 0
             cur_len += 1
 
+            # Update the eagle features with the newly generated one!
+            if eagle_input_features is not None:
+                eagle_input_features = torch.cat((eagle_input_features, outputs.last_hidden_state[:, -1, :].unsqueeze(1)), dim=1)
+
             # This is needed to properly delete outputs.logits which may be very large for first iteration
             # Otherwise a reference to outputs is kept which keeps the logits alive in the next iteration
             del outputs
@@ -3337,6 +3348,7 @@ class GenerationMixin:
                     hidden_states=decoder_hidden_states,
                     past_key_values=model_kwargs.get("past_key_values"),
                     cache_params=return_cache_params if (return_cache_params is not None) else None,
+                    last_hidden_state=eagle_input_features if (eagle_input_features is not None) else None,
                 )
         else:
             return input_ids
