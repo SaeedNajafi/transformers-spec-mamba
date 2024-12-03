@@ -3252,7 +3252,7 @@ class GenerationMixin:
 
             # forward pass to get next token
             if eagle_input_features is not None:
-                outputs = self(**model_inputs, eagle_input_features=eagle_input_features, return_dict=True)
+                outputs = self(**model_inputs, eagle_features=eagle_input_features, return_dict=True)
             else:
                 outputs = self(**model_inputs, return_dict=True)
 
