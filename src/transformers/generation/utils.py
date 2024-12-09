@@ -3252,7 +3252,10 @@ class GenerationMixin:
 
             # forward pass to get next token
             if eagle_input_features is not None:
-                outputs = self(**model_inputs, eagle_features=eagle_input_features, return_dict=True)
+                batch_size, sq_len = model_inputs["input_ids"].size()
+                batch_size, feature_seq_len, hidden_dims = eagle_input_features.size()
+                eagle_new_input_features = eagle_input_features[:, -sq_len:, :].view(batch_size, sq_len, hidden_dims)
+                outputs = self(**model_inputs, eagle_features=eagle_new_input_features, return_dict=True)
             else:
                 outputs = self(**model_inputs, return_dict=True)
 

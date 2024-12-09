@@ -327,6 +327,11 @@ class EagleLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
                 # Only the transformer layers should be active.
                 # The LM head + embedding table from the target model will be fixed.
                 param.requires_grad = True
+                # We like to be re-initialize the layers to be fair to the Mamba model without pre-trained weights.
+                self._init_weights(param)
+            elif "eagle_down_proj" in name:
+                param.requires_grad = True
+                self._init_weights(param)
             else:
                 param.requires_grad = False
 
