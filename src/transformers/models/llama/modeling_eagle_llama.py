@@ -34,6 +34,7 @@ class EagleLlamaModel(LlamaPreTrainedModel):
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         if config.is_eagle:
             self.eagle_down_proj = nn.Linear(2 * config.hidden_size, config.hidden_size, bias=True)
+            # self.eagle_input_norm = LlamaRMSNorm(2 * config.hidden_size, eps=config.rms_norm_eps)
 
         self.layers = nn.ModuleList(
             [LlamaDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
@@ -113,7 +114,9 @@ class EagleLlamaModel(LlamaPreTrainedModel):
 
         if eagle_features is not None:
             inputs_embeds = inputs_embeds.to(eagle_features.dtype)
-            hidden_states = self.eagle_down_proj(torch.cat((inputs_embeds, eagle_features), dim=-1))
+            # eagle_inputs = self.eagle_input_norm(torch.cat((inputs_embeds, eagle_features), dim=-1))
+            eagle_inputs = torch.cat((inputs_embeds, eagle_features), dim=-1)
+            hidden_states = self.eagle_down_proj(eagle_inputs)
         else:
             hidden_states = inputs_embeds
 
@@ -332,6 +335,9 @@ class EagleLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
             elif "eagle_down_proj" in name:
                 param.requires_grad = True
                 self._init_weights(param)
+            # elif "eagle_input_norm" in name:
+            #    param.requires_grad = True
+            #    self._init_weights(param)
             else:
                 param.requires_grad = False
 
