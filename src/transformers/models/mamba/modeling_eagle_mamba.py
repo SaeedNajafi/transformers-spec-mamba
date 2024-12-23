@@ -109,6 +109,9 @@ class EagleMambaModel(MambaPreTrainedModel):
         else:
             hidden_states = inputs_embeds
 
+        print(hidden_states)
+        print("internal")
+
         all_hidden_states = () if output_hidden_states else None
         for mixer_block in self.layers:
             if self.gradient_checkpointing and self.training:
@@ -162,11 +165,8 @@ class EagleMambaForCausalLM(MambaPreTrainedModel, GenerationMixin):
                 # Only the transformer layers should be active.
                 # The LM head + embedding table from the target model will be fixed.
                 param.requires_grad = True
-                # We like to be re-initialize the layers to be fair to the Mamba model without pre-trained weights.
-                self._init_weights(param)
             elif "eagle_down_proj" in name:
                 param.requires_grad = True
-                self._init_weights(param)
             else:
                 param.requires_grad = False
 
@@ -304,7 +304,7 @@ class EagleMambaForCausalLM(MambaPreTrainedModel, GenerationMixin):
             return ((loss,) + output) if loss is not None else output
 
         return MambaCausalLMOutput(
-            last_hidden_state=outputs.last_hidden_state,
+            last_hidden_state=mamba_outputs.last_hidden_state,
             loss=loss,
             logits=logits,
             cache_params=mamba_outputs.cache_params,

@@ -413,10 +413,6 @@ class MambaPreTrainedModel(PreTrainedModel):
                 module.dt_proj.bias.copy_(inv_dt)
             module.dt_proj.bias._no_reinit = True
 
-        if isinstance(module, nn.Linear):
-            if module.bias is not None:
-                if not getattr(module.bias, "_no_reinit", False):
-                    nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, std=self.config.initializer_range)
 
