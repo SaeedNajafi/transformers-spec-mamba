@@ -384,7 +384,7 @@ class MambaPreTrainedModel(PreTrainedModel):
     """
 
     config_class = MambaConfig
-    base_model_prefix = "backbone"
+    base_model_prefix = "model"
     _no_split_modules = ["MambaBlock", "MambaMixer"]
     supports_gradient_checkpointing = True
     _is_stateful = True
@@ -484,7 +484,7 @@ class MambaCausalLMOutput(ModelOutput):
 
             Hidden-states of the model at the output of each layer plus the optional initial embedding outputs.
     """
-
+    last_hidden_state: Optional[torch.FloatTensor] = None
     loss: Optional[torch.FloatTensor] = None
     logits: Optional[torch.FloatTensor] = None
     cache_params: Optional[MambaCache] = None
@@ -548,26 +548,26 @@ class MambaModel(MambaPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
 
-        self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size)
+        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
         self.layers = nn.ModuleList([MambaBlock(config, layer_idx=idx) for idx in range(config.num_hidden_layers)])
         self.cache_snapshots: List[Tuple[torch.Tensor, torch.Tensor]] = None
         self.gradient_checkpointing = False
-        self.norm_f = MambaRMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
+        self.norm = MambaRMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
         # Initialize weights and apply final processing
         self._register_load_state_dict_pre_hook(self.load_hook)
         self.post_init()
 
     def load_hook(self, state_dict, prefix, *args):
         for k in state_dict:
-            if "embedding." in k:
-                state_dict[k.replace("embedding.", "embeddings.")] = state_dict.pop(k)
+            if "embed_token." in k:
+                state_dict[k.replace("embed_token.", "embed_tokens.")] = state_dict.pop(k)
                 break
 
     def get_input_embeddings(self):
-        return self.embeddings
+        return self.embed_tokens
 
     def set_input_embeddings(self, new_embeddings):
-        self.embeddings = new_embeddings
+        self.embed_tokens = new_embeddings
 
     @add_start_docstrings_to_model_forward(MAMBA_INPUTS_DOCSTRING)
     @add_code_sample_docstrings(
@@ -596,7 +596,7 @@ class MambaModel(MambaPreTrainedModel):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
         if inputs_embeds is None:
-            inputs_embeds = self.embeddings(input_ids)
+            inputs_embeds = self.embed_tokens(input_ids)
 
         if self.gradient_checkpointing and self.training and use_cache:
             use_cache = False
@@ -646,7 +646,7 @@ class MambaModel(MambaPreTrainedModel):
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
 
-        hidden_states = self.norm_f(hidden_states)
+        hidden_states = self.norm(hidden_states)
 
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
@@ -673,7 +673,7 @@ class MambaForCausalLM(MambaPreTrainedModel, GenerationMixin):
 
     def __init__(self, config):
         super().__init__(config)
-        self.backbone = MambaModel(config)
+        self.model = MambaModel(config)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         # Initialize weights and apply final processing
         self.post_init()
@@ -685,10 +685,10 @@ class MambaForCausalLM(MambaPreTrainedModel, GenerationMixin):
         self.lm_head = new_embeddings
 
     def get_input_embeddings(self):
-        return self.backbone.get_input_embeddings()
+        return self.model.get_input_embeddings()
 
     def set_input_embeddings(self, new_embeddings):
-        return self.backbone.set_input_embeddings(new_embeddings)
+        return self.model.set_input_embeddings(new_embeddings)
 
     def _update_model_kwargs_for_generation(
         self, outputs: ModelOutput, model_kwargs: Dict[str, Any], num_new_tokens: int = 1, **kwargs
@@ -785,7 +785,7 @@ class MambaForCausalLM(MambaPreTrainedModel, GenerationMixin):
         """
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        mamba_outputs = self.backbone(
+        mamba_outputs = self.model(
             input_ids,
             cache_params=cache_params,
             inputs_embeds=inputs_embeds,
