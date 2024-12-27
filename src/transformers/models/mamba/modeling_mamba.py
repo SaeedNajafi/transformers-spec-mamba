@@ -143,7 +143,7 @@ class MambaMixer(nn.Module):
     ):
         # 1. Gated MLP's linear projection
         projected_states = self.in_proj(hidden_states).transpose(1, 2)
-
+        print("projected_states:", projected_states)
         if self.training and cache_params is None:  # Doesn't support outputting the states -> used for training
             contextualized_states = mamba_inner_fn(
                 projected_states,
@@ -277,6 +277,7 @@ class MambaMixer(nn.Module):
         if attention_mask is not None:
             hidden_states = hidden_states * attention_mask.unsqueeze(1)
 
+
         # 3. State Space Model sequence transformation
         # 3.a. Selection:  [batch, seq_len, self.time_step_rank + self.ssm_state_size * 2]
         ssm_parameters = self.x_proj(hidden_states.transpose(1, 2))
@@ -312,8 +313,10 @@ class MambaMixer(nn.Module):
             if cache_params is not None:
                 cache_params.ssm_states[self.layer_idx].copy_(ssm_state)
 
+
         # 4. Final linear projection
         contextualized_states = self.out_proj(scan_output.transpose(1, 2))  # [batch, seq_len, hidden_size]
+
         return contextualized_states
     # fmt: on
 
