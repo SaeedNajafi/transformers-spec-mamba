@@ -186,9 +186,9 @@ class AssistedCandidateGenerator(CandidateGenerator):
         if self.is_mamba:
             # This is the mamba model used as assistant for draft generation.
             # Initialize the snapshots.
-            self.assistant_model.backbone.cache_snapshots = []
+            self.assistant_model.model.cache_snapshots = []
 
-    def get_candidates(self, input_ids: torch.LongTensor) -> Tuple[torch.LongTensor, Optional[torch.FloatTensor]]:
+    def get_candidates(self, input_ids: torch.LongTensor, eagle_input_features: Optional[torch.FloatTensor] = None) -> Tuple[torch.LongTensor, Optional[torch.FloatTensor]]:
         """
         Fetches the candidates to be tried for the current input.
 
@@ -225,15 +225,38 @@ class AssistedCandidateGenerator(CandidateGenerator):
             self.assistant_kwargs = _prepare_token_type_ids(self.assistant_kwargs, new_cur_len)
 
         # 2. Forecast next N tokens using the assistant model.
-        assistant_generation_kwargs = {
-            self.input_ids_key: input_ids,
-            "min_new_tokens": min_new_tokens,
-            "max_new_tokens": max_new_tokens,
-            "generation_config": self.generation_config,
-            "logits_processor": self.logits_processor,
-        }
-
-        assistant_output = self.assistant_model.generate(**assistant_generation_kwargs, **self.assistant_kwargs)
+        if hasattr(self.assistant_model, "with_mamba"):
+            # This is for mamba-ssm implementation of mamba-in-llama generation
+            # which is wrong and does not handle the cache properly.
+            # Look at the decode of mamba.
+            # https://github.com/state-spaces/mamba/blob/main/mamba_ssm/utils/generation.py#L121
+            if self.assistant_model.with_mamba:
+                assistant_generation_kwargs = {
+                    self.input_ids_key: input_ids,
+                    "max_length": new_cur_len + max_new_tokens,
+                    "top_k": self.generation_config.top_k,
+                    "top_p": self.generation_config.top_p,
+                    "min_p": self.generation_config.min_p,
+                    "temperature": self.generation_config.temperature,
+                    "repetition_penalty": self.generation_config.repetition_penalty,
+                    "eos_token_id": self.generation_config.eos_token_id,
+                    "vocab_size": self.assistant_model.model.vocab_size,
+                    "cg": True,
+                    "return_dict_in_generate": self.generation_config.return_dict_in_generate,
+                    "output_scores": self.generation_config.output_scores,
+                }
+                # No need for attention mask and use_cache flag.
+                assistant_output = self.assistant_model.generate(**assistant_generation_kwargs)
+        else:
+            assistant_generation_kwargs = {
+                self.input_ids_key: input_ids,
+                "min_new_tokens": min_new_tokens,
+                "max_new_tokens": max_new_tokens,
+                "generation_config": self.generation_config,
+                "logits_processor": self.logits_processor,
+            }
+            assistant_output = self.assistant_model.generate(**assistant_generation_kwargs, **self.assistant_kwargs, 
+                                                             eagle_input_features=eagle_input_features)
 
         # 3. Update variables for the next round of candidate generation
         self.assistant_kwargs["past_key_values"] = assistant_output.past_key_values
@@ -274,7 +297,7 @@ class AssistedCandidateGenerator(CandidateGenerator):
         if self.is_mamba:
             # This is the mamba model used as assistant for draft generation.
             # We now need to roll back state of the mamba to the state of the last accepted token.
-            for idx, snapshot in enumerate(self.assistant_model.backbone.cache_snapshots):
+            for idx, snapshot in enumerate(self.assistant_model.model.cache_snapshots):
                 if idx == num_matches:
                     snapshot_to_revive = snapshot
                     conv_state, ssm_state = snapshot_to_revive
@@ -284,11 +307,11 @@ class AssistedCandidateGenerator(CandidateGenerator):
                     current_cache_params.conv_states.add_(conv_state)
                     current_cache_params.ssm_states.add_(ssm_state)
 
-            del self.assistant_model.backbone.cache_snapshots
+            del self.assistant_model.model.cache_snapshots
             torch.cuda.empty_cache()
             gc.collect()
             # reset the snapshots.
-            self.assistant_model.backbone.cache_snapshots = []
+            self.assistant_model.model.cache_snapshots = []
                 
                 
 
@@ -455,7 +478,7 @@ class AssistedCandidateGeneratorDifferentTokenizers(AssistedCandidateGenerator):
         dest_ids = destination_tokenizer(text, add_special_tokens=True, return_tensors="pt")["input_ids"]
         return dest_ids.to(input_ids.device)
 
-    def get_candidates(self, input_ids: torch.LongTensor) -> Tuple[torch.LongTensor, Optional[torch.FloatTensor]]:
+    def get_candidates(self, input_ids: torch.LongTensor, eagle_input_features: Optional[torch.FloatTensor] = None) -> Tuple[torch.LongTensor, Optional[torch.FloatTensor]]:
         """
         Fetches the candidates to be tried for the current input.
 
@@ -538,17 +561,39 @@ class AssistedCandidateGeneratorDifferentTokenizers(AssistedCandidateGenerator):
             self.assistant_kwargs = _prepare_token_type_ids(self.assistant_kwargs, new_cur_len)
 
         # 2. Forecast next N tokens using the assistant model.
-        assistant_generation_kwargs = {
-            self.input_ids_key: assistant_input_ids,
-            "min_new_tokens": min_new_tokens,
-            "max_new_tokens": max_new_tokens,
-            "generation_config": self.generation_config,
-            "logits_processor": self.logits_processor,
-        }
-
-        self.assistant_kwargs.pop("attention_mask", None)
-
-        assistant_output = self.assistant_model.generate(**assistant_generation_kwargs, **self.assistant_kwargs)
+        if hasattr(self.assistant_model, "with_mamba"):
+            # This is for mamba-ssm implementation of mamba-in-llama generation
+            # which is wrong and does not handle the cache properly.
+            # Look at the decode of mamba.
+            # https://github.com/state-spaces/mamba/blob/main/mamba_ssm/utils/generation.py#L121
+            if self.assistant_model.with_mamba:
+                assistant_generation_kwargs = {
+                    self.input_ids_key: assistant_input_ids,
+                    "max_length": new_cur_len + max_new_tokens,
+                    "top_k": self.generation_config.top_k,
+                    "top_p": self.generation_config.top_p,
+                    "min_p": self.generation_config.min_p,
+                    "temperature": self.generation_config.temperature,
+                    "repetition_penalty": self.generation_config.repetition_penalty,
+                    "eos_token_id": self.generation_config.eos_token_id,
+                    "vocab_size": self.assistant_model.model.vocab_size,
+                    "cg": True,
+                    "return_dict_in_generate": self.generation_config.return_dict_in_generate,
+                    "output_scores": self.generation_config.output_scores,
+                }
+                # No need for attention mask and use_cache flag.
+                assistant_output = self.assistant_model.generate(**assistant_generation_kwargs)
+        else:
+            assistant_generation_kwargs = {
+                self.input_ids_key: assistant_input_ids,
+                "min_new_tokens": min_new_tokens,
+                "max_new_tokens": max_new_tokens,
+                "generation_config": self.generation_config,
+                "logits_processor": self.logits_processor,
+            }
+            self.assistant_kwargs.pop("attention_mask", None)
+            assistant_output = self.assistant_model.generate(**assistant_generation_kwargs, **self.assistant_kwargs,
+                                                             eagle_input_features=eagle_input_features)
 
         num_prev_assistant = self.prev_assistant_ids.shape[1]
         start_assistant_look_index = num_prev_assistant - self.assistant_lookbehind

@@ -4241,6 +4241,7 @@ class GenerationMixin:
             `model.config.is_encoder_decoder=True`.
         """
         # init values
+        pad_token_id = generation_config._pad_token_tensor
         do_sample = generation_config.do_sample
         output_attentions = generation_config.output_attentions
         output_hidden_states = generation_config.output_hidden_states
@@ -4267,13 +4268,34 @@ class GenerationMixin:
         unfinished_sequences = torch.ones(batch_size, dtype=torch.long, device=input_ids.device)
         model_kwargs = self._get_initial_cache_position(input_ids, model_kwargs)
 
+        if hasattr(candidate_generator.assistant_model.config, "is_eagle"):
+            if candidate_generator.assistant_model.config.is_eagle:
+                # 0. Let's fetch features from the main model.
+                # prepare model inputs
+                model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
+
+                # prepare variable output controls (note: some models won't accept all output controls)
+                model_inputs.update({"output_attentions": output_attentions} if output_attentions else {})
+                model_inputs.update({"output_hidden_states": output_hidden_states} if output_hidden_states else {})
+                outputs = self(**model_inputs, return_dict=True)
+
+                first_step_tensor = outputs.last_hidden_state[:, 0, :]
+                eagle_input_features = torch.roll(outputs.last_hidden_state, shifts=1, dims=1)
+                eagle_input_features[:, 0, :] = first_step_tensor
+
+        else:
+            eagle_input_features = None
+
+        step = 0
         this_peer_finished = False
-        is_first_iteration = True  # to preserve the same API in the output as other generation methods
+        is_first_iteration = True
+        accept_length_list = []
         while self._has_unfinished_sequences(this_peer_finished, synced_gpus, device=input_ids.device):
             cur_len = input_ids.shape[-1]
+            step += 1
 
             #  1. Fetch candidate sequences from a `CandidateGenerator`
-            candidate_input_ids, candidate_logits = candidate_generator.get_candidates(input_ids)
+            candidate_input_ids, candidate_logits = candidate_generator.get_candidates(input_ids, eagle_input_features=eagle_input_features)
 
             if candidate_logits is not None:
                 candidate_logits = candidate_logits.to(self.device)
@@ -4360,6 +4382,11 @@ class GenerationMixin:
             if streamer is not None:
                 streamer.put(valid_tokens.cpu())
             new_cur_len = input_ids.shape[-1]
+            # Update eagle input features if necessary for the draft model.
+            if hasattr(candidate_generator.assistant_model.config, "is_eagle"):
+                if candidate_generator.assistant_model.config.is_eagle:
+                    last_valid_hidden_states = outputs.last_hidden_state[:, cur_len-1:new_cur_len-1, :]
+                    eagle_input_features = torch.cat((eagle_input_features, last_valid_hidden_states), dim=1)
 
             # 4.2. Discard past key values relative to unused assistant tokens
             new_cache_size = new_cur_len - 1
@@ -4375,6 +4402,9 @@ class GenerationMixin:
                 is_encoder_decoder=self.config.is_encoder_decoder,
                 num_new_tokens=n_matches + 1,
             )
+            
+            accept_length_tree = new_cur_len - cur_len
+            accept_length_list.append(accept_length_tree)
             if synced_gpus and this_peer_finished:
                 continue
 
@@ -4433,6 +4463,7 @@ class GenerationMixin:
             candidate_generator.assistant_model.generation_config.num_assistant_tokens = (
                 candidate_generator.num_assistant_tokens
             )
+        idx = step - 1
         if return_dict_in_generate:
             if self.config.is_encoder_decoder:
                 return GenerateEncoderDecoderOutput(
@@ -4456,7 +4487,7 @@ class GenerationMixin:
                     past_key_values=model_kwargs.get("past_key_values"),
                 )
         else:
-            return input_ids
+            return (input_ids, idx, accept_length_list)
 
 
 def _speculative_sampling(
