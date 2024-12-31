@@ -3253,8 +3253,7 @@ class GenerationMixin:
             # forward pass to get next token
             if eagle_input_features is not None:
                 batch_size, sq_len = model_inputs["input_ids"].size()
-                batch_size, feature_seq_len, hidden_dims = eagle_input_features.size()
-                eagle_new_input_features = eagle_input_features[:, -sq_len:, :].view(batch_size, sq_len, hidden_dims)
+                eagle_new_input_features = eagle_input_features[:, -sq_len:, :].view(batch_size, sq_len, -1)
                 outputs = self(**model_inputs, eagle_features=eagle_new_input_features, return_dict=True)
             else:
                 outputs = self(**model_inputs, return_dict=True)
@@ -3319,7 +3318,7 @@ class GenerationMixin:
 
             # Update the eagle features with the newly generated one!
             if eagle_input_features is not None:
-                eagle_input_features = torch.cat((eagle_input_features, outputs.last_hidden_state[:, -1, :].unsqueeze(1)), dim=1)
+                eagle_input_features = outputs.last_hidden_state[:, -1, :].unsqueeze(1)
 
             # This is needed to properly delete outputs.logits which may be very large for first iteration
             # Otherwise a reference to outputs is kept which keeps the logits alive in the next iteration
@@ -4267,7 +4266,11 @@ class GenerationMixin:
         batch_size = input_ids.shape[0]
         unfinished_sequences = torch.ones(batch_size, dtype=torch.long, device=input_ids.device)
         model_kwargs = self._get_initial_cache_position(input_ids, model_kwargs)
-
+        accept_length_list = []
+        eagle_input_features = None
+        this_peer_finished = False
+        is_first_iteration = True
+        step = 0
         if hasattr(candidate_generator.assistant_model.config, "is_eagle"):
             if candidate_generator.assistant_model.config.is_eagle:
                 # 0. Let's fetch features from the main model.
@@ -4279,23 +4282,77 @@ class GenerationMixin:
                 model_inputs.update({"output_hidden_states": output_hidden_states} if output_hidden_states else {})
                 outputs = self(**model_inputs, return_dict=True)
 
-                first_step_tensor = outputs.last_hidden_state[:, 0, :]
-                eagle_input_features = torch.roll(outputs.last_hidden_state, shifts=1, dims=1)
-                eagle_input_features[:, 0, :] = first_step_tensor
+                model_kwargs = self._update_model_kwargs_for_generation(
+                    outputs,
+                    model_kwargs,
+                    is_encoder_decoder=self.config.is_encoder_decoder,
+                )
 
-        else:
-            eagle_input_features = None
+                # Clone is needed to avoid keeping a hanging ref to outputs.logits which may be very large for first iteration
+                # (the clone itself is always small)
+                next_token_logits = outputs.logits[:, -1, :].clone().float()
+                next_token_logits = next_token_logits.to(input_ids.device)
 
-        step = 0
-        this_peer_finished = False
-        is_first_iteration = True
-        accept_length_list = []
+                # pre-process distribution
+                next_token_scores = logits_processor(input_ids, next_token_logits)
+
+                # Store scores, attentions and hidden_states when required
+                if return_dict_in_generate:
+                    if output_scores:
+                        scores += (next_token_scores,)
+                    if output_logits:
+                        raw_logits += (next_token_logits,)
+                    if output_attentions:
+                        decoder_attentions += (
+                            (outputs.decoder_attentions,) if self.config.is_encoder_decoder else (outputs.attentions,)
+                        )
+                        if self.config.is_encoder_decoder:
+                            cross_attentions += (outputs.cross_attentions,)
+
+                    if output_hidden_states:
+                        decoder_hidden_states += (
+                            (outputs.decoder_hidden_states,)
+                            if self.config.is_encoder_decoder
+                            else (outputs.hidden_states,)
+                        )
+
+                # token selection
+                if do_sample:
+                    probs = nn.functional.softmax(next_token_scores, dim=-1)
+                    # TODO (joao): this OP throws "skipping cudagraphs due to ['incompatible ops']", find solution
+                    next_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)
+                else:
+                    next_tokens = torch.argmax(next_token_scores, dim=-1)
+
+                next_tokens = next_tokens * unfinished_sequences + pad_token_id * (1 - unfinished_sequences)
+
+                # update generated ids, model inputs, and length for next step
+                input_ids = torch.cat([input_ids, next_tokens[:, None]], dim=-1)
+                if streamer is not None:
+                    streamer.put(next_tokens.cpu())
+
+                unfinished_sequences = unfinished_sequences & ~stopping_criteria(input_ids, scores)
+                this_peer_finished = unfinished_sequences.max() == 0
+
+                first_token = input_ids[:, 0].unsqueeze(1)
+                eagle_input_features = outputs.last_hidden_state
+
+                is_first_iteration = False
+                accept_length_list.append(1)
+                step += 1
+
         while self._has_unfinished_sequences(this_peer_finished, synced_gpus, device=input_ids.device):
             cur_len = input_ids.shape[-1]
             step += 1
 
             #  1. Fetch candidate sequences from a `CandidateGenerator`
-            candidate_input_ids, candidate_logits = candidate_generator.get_candidates(input_ids, eagle_input_features=eagle_input_features)
+
+            if hasattr(candidate_generator.assistant_model.config, "is_eagle"):
+                if candidate_generator.assistant_model.config.is_eagle:
+                    candidate_input_ids, candidate_logits = candidate_generator.get_candidates(input_ids[:, 1:], eagle_input_features=eagle_input_features)
+                    candidate_input_ids = torch.cat((first_token, candidate_input_ids), dim=1)
+            else:
+                candidate_input_ids, candidate_logits = candidate_generator.get_candidates(input_ids, eagle_input_features=None)
 
             if candidate_logits is not None:
                 candidate_logits = candidate_logits.to(self.device)
@@ -4385,7 +4442,7 @@ class GenerationMixin:
             # Update eagle input features if necessary for the draft model.
             if hasattr(candidate_generator.assistant_model.config, "is_eagle"):
                 if candidate_generator.assistant_model.config.is_eagle:
-                    last_valid_hidden_states = outputs.last_hidden_state[:, cur_len-1:new_cur_len-1, :]
+                    last_valid_hidden_states = outputs.last_hidden_state[:, 0:n_matches + 1, :]
                     eagle_input_features = torch.cat((eagle_input_features, last_valid_hidden_states), dim=1)
 
             # 4.2. Discard past key values relative to unused assistant tokens
