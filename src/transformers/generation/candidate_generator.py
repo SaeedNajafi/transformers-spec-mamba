@@ -110,6 +110,9 @@ class AssistedCandidateGenerator(CandidateGenerator):
 
         # Prepare the assistant and the starting number of candidate tokens
         self.assistant_model = assistant_model
+        # if hasattr(self.assistant_model.config, "is_eagle"):
+        #   if self.assistant_model.config.is_eagle:
+        #       self.previous_num_matches = 0
         self.num_assistant_tokens = assistant_model.generation_config.num_assistant_tokens
         self.assistant_confidence_threshold = assistant_model.generation_config.assistant_confidence_threshold
 
@@ -215,6 +218,10 @@ class AssistedCandidateGenerator(CandidateGenerator):
         has_past_key_values = self.assistant_kwargs.get("past_key_values", None) is not None
         if has_past_key_values:
             new_cache_size = new_cur_len - 1
+            #if hasattr(self.assistant_model.config, "is_eagle"):
+            #    if self.assistant_model.config.is_eagle:
+            #        # Let's use teacher features even if the samples token by the student matches.
+            #        new_cache_size -= self.previous_num_matches
             self.assistant_kwargs["past_key_values"] = _crop_past_key_values(
                 self.assistant_model, self.assistant_kwargs["past_key_values"], new_cache_size - 1
             )  # the assistant does not have the token after the last match, hence the -1
@@ -293,6 +300,10 @@ class AssistedCandidateGenerator(CandidateGenerator):
                 self.num_assistant_tokens += 2.0
             else:
                 self.num_assistant_tokens = max(1.0, self.num_assistant_tokens - 1.0)
+
+        #if hasattr(self.assistant_model.config, "is_eagle"):
+        #    if self.assistant_model.config.is_eagle:
+        #        self.previous_num_matches = num_matches
 
         if self.is_mamba:
             # This is the mamba model used as assistant for draft generation.
